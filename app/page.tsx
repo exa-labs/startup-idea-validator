@@ -1,9 +1,5 @@
-import IdeaValidatorHome from "../components/idea-validator/IdeaValidatorHome";
+import VoiceDemoHome from "@/components/voice-demo/VoiceDemoHome";
 
 export default function Home() {
-  return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-white">
-      <IdeaValidatorHome />
-    </main>
-  );
+  return <VoiceDemoHome />;
 }
