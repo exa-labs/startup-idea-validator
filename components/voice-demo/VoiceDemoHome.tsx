@@ -115,6 +115,7 @@ export default function VoiceDemoHome() {
   const [isSpeculativeSearching, setIsSpeculativeSearching] = useState(false);
   const [resultsTab, setResultsTab] = useState<"fast" | "content">("fast");
   const [citations, setCitations] = useState<number[]>([]);
+  const [optimizedQuery, setOptimizedQuery] = useState<string>("");
   const [timestamps, setTimestamps] = useState<PipelineTimestamps>(EMPTY_TIMESTAMPS);
   const timestampsRef = useRef<PipelineTimestamps>(EMPTY_TIMESTAMPS);
   const [liveElapsedMs, setLiveElapsedMs] = useState(0);
@@ -188,6 +189,9 @@ export default function VoiceDemoHome() {
           const data = await response.json();
           if (state === "recording") {
             setSpeculativeResults(data.results);
+            if (data.optimizedQuery) {
+              setOptimizedQuery(data.optimizedQuery);
+            }
             // Track when first results arrive
             if (!timestampsRef.current.fastSearchEnd) {
               updateTimestamp("fastSearchEnd", Date.now());
@@ -245,6 +249,7 @@ export default function VoiceDemoHome() {
     setResultsTab("fast");
     setSpokenText("");
     setCitations([]);
+    setOptimizedQuery("");
     lastSearchedQuery.current = "";
 
     // Stop any playing audio
@@ -398,6 +403,9 @@ export default function VoiceDemoHome() {
 
         setSearchResults(searchData.results);
         setResultsTab("content");
+        if (searchData.optimizedQuery) {
+          setOptimizedQuery(searchData.optimizedQuery);
+        }
 
         // Stream Gemini text + ElevenLabs audio
         await runStreamingTTS(finalTranscript, searchData.results);
@@ -429,6 +437,7 @@ export default function VoiceDemoHome() {
     setResultsTab("content");
     setSpokenText("");
     setCitations([]);
+    setOptimizedQuery("");
 
     const now = Date.now();
     const freshTimestamps = {
@@ -464,6 +473,9 @@ export default function VoiceDemoHome() {
       updateTimestamp("contentSearchEnd", Date.now());
 
       setSearchResults(searchData.results);
+      if (searchData.optimizedQuery) {
+        setOptimizedQuery(searchData.optimizedQuery);
+      }
 
       // Stream Gemini text + ElevenLabs audio
       await runStreamingTTS(query, searchData.results);
@@ -670,7 +682,7 @@ export default function VoiceDemoHome() {
                 )}
               </div>
               <QueryTypeWriter
-                query={liveTranscript || transcript || ""}
+                query={optimizedQuery || liveTranscript || transcript || ""}
                 mode="fast"
                 isTyping={state === "recording"}
               />
