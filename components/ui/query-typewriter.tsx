@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 interface QueryTypeWriterProps {
@@ -16,21 +16,52 @@ export function QueryTypeWriter({
   className,
   isTyping = true,
 }: QueryTypeWriterProps) {
-  // Build the code block content
-  const codeContent = useMemo(() => {
-    const searchType = mode === "fast" ? "keyword" : "auto";
+  const [displayedLength, setDisplayedLength] = useState(0);
+  const targetLength = query.length;
+  const prevQueryRef = useRef("");
 
-    return {
-      prefix: "result = exa.search(",
-      query: query || "",
-      config: `  type = "${searchType}",
-  contents = {
-    "text": True,
-    "highlights": True
-  }
-)`,
-    };
-  }, [query, mode]);
+  // When query changes, figure out how many new characters to animate
+  useEffect(() => {
+    const prev = prevQueryRef.current;
+    prevQueryRef.current = query;
+
+    if (query.length === 0) {
+      // Reset
+      setDisplayedLength(0);
+      return;
+    }
+
+    // If the new query starts with the old one (appended text), keep displayed length
+    // and let the interval catch up. Otherwise, snap to show the full new query.
+    if (!query.startsWith(prev)) {
+      // Query changed entirely (e.g. correction) - snap to current length
+      setDisplayedLength(query.length);
+    }
+    // If query starts with prev, displayedLength stays where it is and the interval will catch up
+  }, [query]);
+
+  // Animate characters at ~30 chars/sec
+  useEffect(() => {
+    if (displayedLength >= targetLength) return;
+
+    const interval = setInterval(() => {
+      setDisplayedLength((prev) => {
+        const next = prev + 1;
+        if (next >= targetLength) {
+          clearInterval(interval);
+          return targetLength;
+        }
+        return next;
+      });
+    }, 33);
+
+    return () => clearInterval(interval);
+  }, [displayedLength, targetLength]);
+
+  const displayedQuery = query.slice(0, displayedLength);
+  const showCursor = isTyping || displayedLength < targetLength;
+
+  const searchType = mode;
 
   return (
     <div className={cn("rounded-xl border border-border bg-[#1e1e2e] overflow-hidden font-mono text-sm", className)}>
@@ -63,12 +94,12 @@ export function QueryTypeWriter({
         <div className="flex">
           <span className="text-purple-400 select-none w-6 text-right mr-4 opacity-50">2</span>
           <span className="pl-4">
-            <span className="text-[#a6e3a1]">"</span>
-            <span className="text-[#a6e3a1]">{codeContent.query}</span>
-            {isTyping && (
+            <span className="text-[#a6e3a1]">&quot;</span>
+            <span className="text-[#a6e3a1]">{displayedQuery}</span>
+            {showCursor && (
               <span className="inline-block w-[2px] h-[1.1em] bg-[#a6e3a1] animate-pulse ml-[1px] align-middle" />
             )}
-            <span className="text-[#a6e3a1]">"</span>
+            <span className="text-[#a6e3a1]">&quot;</span>
             <span className="text-[#cdd6f4]">,</span>
           </span>
         </div>
@@ -79,7 +110,7 @@ export function QueryTypeWriter({
           <span className="pl-4">
             <span className="text-[#fab387]">type</span>
             <span className="text-[#89dceb]"> = </span>
-            <span className="text-[#a6e3a1]">"{mode === "fast" ? "keyword" : "auto"}"</span>
+            <span className="text-[#a6e3a1]">&quot;{searchType}&quot;</span>
             <span className="text-[#cdd6f4]">,</span>
           </span>
         </div>
@@ -98,7 +129,7 @@ export function QueryTypeWriter({
         <div className="flex">
           <span className="text-purple-400 select-none w-6 text-right mr-4 opacity-50">5</span>
           <span className="pl-8">
-            <span className="text-[#a6e3a1]">"text"</span>
+            <span className="text-[#a6e3a1]">&quot;text&quot;</span>
             <span className="text-[#cdd6f4]">: </span>
             <span className="text-[#fab387]">True</span>
             <span className="text-[#cdd6f4]">,</span>
@@ -109,7 +140,7 @@ export function QueryTypeWriter({
         <div className="flex">
           <span className="text-purple-400 select-none w-6 text-right mr-4 opacity-50">6</span>
           <span className="pl-8">
-            <span className="text-[#a6e3a1]">"highlights"</span>
+            <span className="text-[#a6e3a1]">&quot;highlights&quot;</span>
             <span className="text-[#cdd6f4]">: </span>
             <span className="text-[#fab387]">True</span>
           </span>

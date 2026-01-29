@@ -215,7 +215,7 @@ export async function POST(req: NextRequest) {
     if (withContents) {
       // Stage 2: Full search with text snippets (for final results + TTS)
       const textOptions: { maxCharacters: number; maxAgeHours?: number } = {
-        maxCharacters: 300
+        maxCharacters: 1000
       };
 
       // Use live crawl for time-sensitive queries (weather, stocks, sports, etc.)

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { Volume2, VolumeX, Search, MicIcon } from "lucide-react";
+import { Volume2, VolumeX, Search, MicIcon, SquareIcon } from "lucide-react";
 import {
   SpeechInput,
   SpeechInputRecordButton,
@@ -11,6 +11,7 @@ import { LiveWaveform } from "@/components/ui/live-waveform";
 import { CommitStrategy } from "@/hooks/use-scribe";
 import VoiceSearchResults from "./VoiceSearchResults";
 import { QueryTypeWriter } from "@/components/ui/query-typewriter";
+import { PipelineTimeline, EMPTY_TIMESTAMPS, type PipelineTimestamps } from "./PipelineTimeline";
 
 interface SearchResult {
   title: string;
@@ -55,7 +56,7 @@ function useDebounce<T>(value: T, delay: number): T {
 async function consumeStreamingTTS(
   response: Response,
   onTextChunk: (chunk: string) => void,
-  onTextDone: (fullText: string) => void,
+  onTextDone: (fullText: string, citations: number[]) => void,
   onAudioChunk: (base64: string) => void,
   onDone: () => void,
   onError: (error: string) => void,
@@ -85,7 +86,7 @@ async function consumeStreamingTTS(
             onTextChunk(data.chunk);
             break;
           case "textDone":
-            onTextDone(data.fullText);
+            onTextDone(data.fullText, data.citations || []);
             break;
           case "audio":
             onAudioChunk(data.chunk);
@@ -112,42 +113,35 @@ export default function VoiceDemoHome() {
   const [error, setError] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isSpeculativeSearching, setIsSpeculativeSearching] = useState(false);
-  const [elapsedMs, setElapsedMs] = useState(0);
+  const [resultsTab, setResultsTab] = useState<"fast" | "content">("fast");
+  const [citations, setCitations] = useState<number[]>([]);
+  const [timestamps, setTimestamps] = useState<PipelineTimestamps>(EMPTY_TIMESTAMPS);
+  const timestampsRef = useRef<PipelineTimestamps>(EMPTY_TIMESTAMPS);
+  const [liveElapsedMs, setLiveElapsedMs] = useState(0);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const speculativeSearchRef = useRef<AbortController | null>(null);
   const lastSearchedQuery = useRef<string>("");
-  const recordingStartTime = useRef<number | null>(null);
-  const firstResultTime = useRef<number | null>(null);
 
-  // Timer for elapsed milliseconds - stops when first result appears
+  const updateTimestamp = useCallback((key: keyof PipelineTimestamps, value: number) => {
+    timestampsRef.current = { ...timestampsRef.current, [key]: value };
+    setTimestamps(prev => ({ ...prev, [key]: value }));
+  }, []);
+
+  // Live elapsed timer - runs until TTS generation finishes
   useEffect(() => {
-    if (state === "recording") {
-      recordingStartTime.current = Date.now();
-      firstResultTime.current = null;
-      setElapsedMs(0);
+    if (timestamps.speechStart && !timestamps.ttsDone && state !== "idle" && state !== "done") {
       const interval = setInterval(() => {
-        if (recordingStartTime.current && !firstResultTime.current) {
-          setElapsedMs(Date.now() - recordingStartTime.current);
-        }
-      }, 10);
+        setLiveElapsedMs(Date.now() - timestamps.speechStart!);
+      }, 16);
       return () => clearInterval(interval);
-    } else {
-      recordingStartTime.current = null;
-      firstResultTime.current = null;
+    } else if (timestamps.speechStart && timestamps.ttsDone) {
+      setLiveElapsedMs(timestamps.ttsDone - timestamps.speechStart);
     }
-  }, [state]);
+  }, [timestamps.speechStart, timestamps.ttsDone, state]);
 
-  // Capture time when first result appears
-  useEffect(() => {
-    if (speculativeResults && speculativeResults.length > 0 && recordingStartTime.current && !firstResultTime.current) {
-      firstResultTime.current = Date.now();
-      setElapsedMs(firstResultTime.current - recordingStartTime.current);
-    }
-  }, [speculativeResults]);
-
-  // Debounce live transcript for speculative search (400ms)
-  const debouncedTranscript = useDebounce(liveTranscript, 400);
+  // Debounce live transcript for speculative search (200ms)
+  const debouncedTranscript = useDebounce(liveTranscript, 200);
 
   // Speculative search while user is speaking
   useEffect(() => {
@@ -157,9 +151,8 @@ export default function VoiceDemoHome() {
 
     const query = debouncedTranscript.trim();
 
-    // Wait for at least ~20 chars (~3-4 words) before speculative searching
-    // to ensure meaningful queries that return relevant results
-    if (query === lastSearchedQuery.current || query.length < 20) {
+    // Wait for at least ~10 chars (~2 words) before speculative searching
+    if (query === lastSearchedQuery.current || query.length < 10) {
       return;
     }
 
@@ -174,6 +167,10 @@ export default function VoiceDemoHome() {
 
     const runSpeculativeSearch = async () => {
       setIsSpeculativeSearching(true);
+      // Track first speculative search request
+      if (!timestampsRef.current.fastSearchStart) {
+        updateTimestamp("fastSearchStart", Date.now());
+      }
       try {
         const response = await fetch("/api/voice-search", {
           method: "POST",
@@ -182,7 +179,7 @@ export default function VoiceDemoHome() {
             query,
             mode: "fast",
             numResults: 8,
-            withContents: false, // Fast - no text snippets needed for preview
+            withContents: false, // Fast - titles only for instant display
           }),
           signal: controller.signal,
         });
@@ -191,6 +188,10 @@ export default function VoiceDemoHome() {
           const data = await response.json();
           if (state === "recording") {
             setSpeculativeResults(data.results);
+            // Track when first results arrive
+            if (!timestampsRef.current.fastSearchEnd) {
+              updateTimestamp("fastSearchEnd", Date.now());
+            }
           }
         }
       } catch (err) {
@@ -207,7 +208,7 @@ export default function VoiceDemoHome() {
     return () => {
       controller.abort();
     };
-  }, [debouncedTranscript, state]);
+  }, [debouncedTranscript, state, updateTimestamp]);
 
   const fetchScribeToken = useCallback(async () => {
     const response = await fetch("/api/elevenlabs-token", { method: "POST" });
@@ -230,14 +231,20 @@ export default function VoiceDemoHome() {
 
   const handleRecordingStart = useCallback(async () => {
     // Reset everything for a fresh conversation
+    const freshTimestamps = { ...EMPTY_TIMESTAMPS, speechStart: Date.now() };
+    timestampsRef.current = freshTimestamps;
+    setTimestamps(freshTimestamps);
+    setLiveElapsedMs(0);
+
     setState("recording");
     setError(null);
     setTranscript("");
     setLiveTranscript("");
     setSearchResults(null);
     setSpeculativeResults(null);
+    setResultsTab("fast");
     setSpokenText("");
-    setElapsedMs(0);
+    setCitations([]);
     lastSearchedQuery.current = "";
 
     // Stop any playing audio
@@ -266,6 +273,8 @@ export default function VoiceDemoHome() {
       setState("speaking");
       setSpokenText("");
 
+      updateTimestamp("llmStart", Date.now());
+
       const ttsResponse = await fetch("/api/text-to-speech-stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -284,9 +293,12 @@ export default function VoiceDemoHome() {
         (chunk) => {
           setSpokenText((prev) => prev + chunk);
         },
-        // onTextDone
-        (_fullText) => {
-          // Text is already assembled from chunks
+        // onTextDone: LLM text generation complete, TTS starts
+        (_fullText, citationIds) => {
+          const now = Date.now();
+          updateTimestamp("llmDone", now);
+          updateTimestamp("ttsStart", now);
+          setCitations(citationIds);
         },
         // onAudioChunk: collect audio data
         (base64) => {
@@ -297,8 +309,10 @@ export default function VoiceDemoHome() {
           }
           audioChunks.push(bytes);
         },
-        // onDone: assemble and play audio
+        // onDone: TTS generation complete, assemble and play audio
         () => {
+          updateTimestamp("ttsDone", Date.now());
+
           const totalLength = audioChunks.reduce((acc, c) => acc + c.length, 0);
           const combined = new Uint8Array(totalLength);
           let offset = 0;
@@ -312,7 +326,9 @@ export default function VoiceDemoHome() {
           const audio = new Audio(audioUrl);
           audioRef.current = audio;
 
-          audio.onplay = () => setIsSpeaking(true);
+          audio.onplay = () => {
+            setIsSpeaking(true);
+          };
           audio.onended = () => {
             setIsSpeaking(false);
             setState("done");
@@ -331,12 +347,20 @@ export default function VoiceDemoHome() {
         }
       );
     },
-    []
+    [updateTimestamp]
   );
 
   const handleRecordingStop = useCallback(
     async (event: { transcript: string }) => {
       const finalTranscript = event.transcript.trim();
+
+      const now = Date.now();
+      updateTimestamp("speechEnd", now);
+
+      // Close out fast search if it was started but never finished (aborted)
+      if (timestampsRef.current.fastSearchStart && !timestampsRef.current.fastSearchEnd) {
+        updateTimestamp("fastSearchEnd", now);
+      }
 
       if (speculativeSearchRef.current) {
         speculativeSearchRef.current.abort();
@@ -352,8 +376,8 @@ export default function VoiceDemoHome() {
       try {
         setState("searching");
 
-        // Single search with contents - skip redundant fast search
-        // since we already have speculative results showing
+        updateTimestamp("contentSearchStart", Date.now());
+
         const searchResponse = await fetch("/api/voice-search", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -370,8 +394,10 @@ export default function VoiceDemoHome() {
         }
 
         const searchData = await searchResponse.json();
+        updateTimestamp("contentSearchEnd", Date.now());
+
         setSearchResults(searchData.results);
-        setSpeculativeResults(null);
+        setResultsTab("content");
 
         // Stream Gemini text + ElevenLabs audio
         await runStreamingTTS(finalTranscript, searchData.results);
@@ -380,16 +406,19 @@ export default function VoiceDemoHome() {
         setState("idle");
       }
     },
-    [runStreamingTTS]
+    [runStreamingTTS, updateTimestamp]
   );
 
-  const handleStopSpeaking = useCallback(() => {
+  const handleStopEverything = useCallback(() => {
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
-      setIsSpeaking(false);
-      setState("done");
     }
+    if (speculativeSearchRef.current) {
+      speculativeSearchRef.current.abort();
+    }
+    setIsSpeaking(false);
+    setState("done");
   }, []);
 
   const handleExampleClick = async (query: string) => {
@@ -397,7 +426,20 @@ export default function VoiceDemoHome() {
     setTranscript(query);
     setSearchResults(null);
     setSpeculativeResults(null);
+    setResultsTab("content");
     setSpokenText("");
+    setCitations([]);
+
+    const now = Date.now();
+    const freshTimestamps = {
+      ...EMPTY_TIMESTAMPS,
+      speechStart: now,
+      speechEnd: now,
+      contentSearchStart: now,
+    };
+    timestampsRef.current = freshTimestamps;
+    setTimestamps(freshTimestamps);
+    setLiveElapsedMs(0);
 
     try {
       // Single search with contents
@@ -418,6 +460,9 @@ export default function VoiceDemoHome() {
       }
 
       const searchData = await searchResponse.json();
+
+      updateTimestamp("contentSearchEnd", Date.now());
+
       setSearchResults(searchData.results);
 
       // Stream Gemini text + ElevenLabs audio
@@ -429,7 +474,8 @@ export default function VoiceDemoHome() {
   };
 
   const isProcessing = ["searching", "speaking"].includes(state);
-  const displayResults = state === "recording" ? speculativeResults : searchResults;
+  const activeResults = resultsTab === "fast" ? speculativeResults : searchResults;
+  const activeCitations = resultsTab === "content" ? citations : [];
 
   return (
     <div className="min-h-screen bg-exa-gray-100 font-diatype text-exa-black">
@@ -528,7 +574,7 @@ export default function VoiceDemoHome() {
                             <p className="text-xs text-exa-gray-500 font-medium">Exa</p>
                             {isSpeaking && (
                               <button
-                                onClick={handleStopSpeaking}
+                                onClick={handleStopEverything}
                                 className="flex items-center gap-1 rounded-full bg-exa-gray-200 px-2.5 py-0.5 text-xs text-exa-gray-700 hover:bg-exa-gray-300 transition-colors"
                               >
                                 <VolumeX className="h-3 w-3" />
@@ -558,10 +604,19 @@ export default function VoiceDemoHome() {
                   className="w-full"
                 >
                   <div className="flex items-center gap-3">
-                    <SpeechInputRecordButton
-                      disabled={isProcessing}
-                      className="h-12 w-12 rounded-full gradient-arrow-btn text-white [&_svg]:text-white shadow-arrow-btn transition-all hover:opacity-90 disabled:opacity-50"
-                    />
+                    {isProcessing ? (
+                      <button
+                        onClick={handleStopEverything}
+                        className="h-12 w-12 rounded-full bg-red-500 text-white flex items-center justify-center shadow-arrow-btn transition-all hover:bg-red-600"
+                        aria-label="Stop"
+                      >
+                        <SquareIcon className="h-5 w-5 fill-current" />
+                      </button>
+                    ) : (
+                      <SpeechInputRecordButton
+                        className="h-12 w-12 rounded-full gradient-arrow-btn text-white [&_svg]:!text-white shadow-arrow-btn transition-all hover:opacity-90 disabled:opacity-50"
+                      />
+                    )}
 
                     <div className="flex-1 flex items-center gap-2 text-sm text-exa-gray-600">
                       {state === "idle" && <span>Start a conversation</span>}
@@ -589,6 +644,11 @@ export default function VoiceDemoHome() {
               </div>
             </div>
 
+            {/* Pipeline Timeline */}
+            {timestamps.speechStart && (
+              <PipelineTimeline timestamps={timestamps} className="mt-6" />
+            )}
+
             {/* Error */}
             {error && (
               <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
@@ -603,9 +663,9 @@ export default function VoiceDemoHome() {
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs text-exa-gray-600 font-medium uppercase tracking-wide">Query Builder</span>
-                {(state === "recording" || elapsedMs > 0) && (
+                {timestamps.speechStart && (
                   <span className="font-mono text-sm tabular-nums text-exa-blue font-medium">
-                    {(elapsedMs / 1000).toFixed(2)}s
+                    {(liveElapsedMs / 1000).toFixed(2)}s
                   </span>
                 )}
               </div>
@@ -619,12 +679,30 @@ export default function VoiceDemoHome() {
             {/* Search Results */}
             <div className="flex-1">
               <div className="flex items-center justify-between mb-3">
-                <span className="text-xs text-exa-gray-600 font-medium uppercase tracking-wide">
-                  {displayResults && displayResults.length > 0
-                    ? `Search Results (${displayResults.length})`
-                    : "Search Results"
-                  }
-                </span>
+                {/* Tabs */}
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setResultsTab("fast")}
+                    className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                      resultsTab === "fast"
+                        ? "bg-exa-blue/10 text-exa-blue"
+                        : "text-exa-gray-500 hover:text-exa-gray-700 hover:bg-exa-gray-200"
+                    }`}
+                  >
+                    Fast{speculativeResults ? ` (${speculativeResults.length})` : ""}
+                  </button>
+                  <button
+                    onClick={() => setResultsTab("content")}
+                    className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                      resultsTab === "content"
+                        ? "bg-exa-blue/10 text-exa-blue"
+                        : "text-exa-gray-500 hover:text-exa-gray-700 hover:bg-exa-gray-200"
+                    }`}
+                  >
+                    Content{searchResults ? ` (${searchResults.length})` : ""}
+                  </button>
+                </div>
+
                 {state === "recording" && isSpeculativeSearching && (
                   <span className="text-xs text-exa-blue flex items-center gap-1 font-medium">
                     <Search className="h-3 w-3 animate-pulse" />
@@ -633,13 +711,15 @@ export default function VoiceDemoHome() {
                 )}
               </div>
 
-              {displayResults && displayResults.length > 0 ? (
-                <VoiceSearchResults results={displayResults} />
+              {activeResults && activeResults.length > 0 ? (
+                <VoiceSearchResults results={activeResults} citations={activeCitations} />
               ) : (
                 <div className="rounded-xl border border-dashed border-exa-gray-300 bg-white p-8 text-center shadow-tag">
                   <Search className="h-8 w-8 mx-auto mb-3 text-exa-gray-400" />
                   <p className="text-sm text-exa-gray-500">
-                    Results will appear here as you speak
+                    {resultsTab === "content" && !searchResults
+                      ? "Content results appear after recording stops"
+                      : "Results will appear here as you speak"}
                   </p>
                 </div>
               )}
